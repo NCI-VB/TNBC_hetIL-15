@@ -1,0 +1,18 @@
+FROM nidap:v1.1
+
+RUN install2.r --error --skipinstalled -n 1 ggnewscale
+
+COPY scripts/pipeline_ctl.sh /opt2
+RUN chmod a+x /opt2/pipeline_ctl.sh
+
+COPY scripts/argparse.bash /opt2
+COPY scripts/snakefile /opt2
+
+RUN chmod -R a+rX /opt2
+
+# Add study data
+RUN mkdir -p /input_data
+COPY cellranger /input_data
+COPY nanostring /input_data
+
+MAINTAINER matthew.g.angel@gmail.com

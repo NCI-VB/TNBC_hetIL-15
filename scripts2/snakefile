@@ -1,0 +1,44 @@
+from os.path import join
+
+configfile: "run.json"
+WORKDIR=config['project']['workdir']
+SCRIPTDIR=config['project']['scriptdir']
+
+NS_COUNTS=config['nanostring']["counts"]
+NS_METADATA=config['nanostring']["metadata"]
+SC_SAMPLES=config['single_cell']["samples"]
+
+print(NS_COUNTS)
+print(NS_METADATA)
+print(SC_SAMPLES)
+
+rule all:
+	input:
+		join(WORKDIR,"nanostring.html"),
+		join(WORKDIR,"single_cell.html")
+
+rule nanostring:
+	input:
+		file1=NS_COUNTS,
+		file2=NS_METADATA
+	output:
+		out=join(WORKDIR,"nanostring.html")
+	params:
+		workdir=WORKDIR,
+		scriptdir=SCRIPTDIR
+	shell:"""
+	touch {output.out}
+"""
+
+
+rule single_cell:
+	input:
+		files=SC_SAMPLES
+	output:
+		out=join(WORKDIR,"single_cell.html")
+	params:
+		workdir=WORKDIR,
+		scriptdir=SCRIPTDIR
+	shell:"""
+	touch {output.out}
+"""

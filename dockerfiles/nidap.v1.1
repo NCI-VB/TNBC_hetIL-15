@@ -1,0 +1,37 @@
+FROM nidap:v1.0
+
+ENV S6_VERSION=v2.1.0.2
+ENV RSTUDIO_VERSION=1.4.1717
+ENV DEFAULT_USER=rstudio
+ENV PATH=/usr/lib/rstudio-server/bin:$PATH
+
+# Install R
+COPY src/rocker-versioned2/scripts /rocker_scripts
+RUN chmod a+x /rocker_scripts/install_rstudio.sh
+RUN /rocker_scripts/install_rstudio.sh
+
+# Install R
+COPY src/rocker-versioned2/scripts/install_pandoc.sh /rocker_scripts/install_pandoc.sh
+RUN chmod a+x /rocker_scripts/install_pandoc.sh
+RUN /rocker_scripts/install_pandoc.sh
+
+ENV DISABLE_AUTH=true
+
+EXPOSE 8787
+
+
+# install snakemake
+COPY src/Miniconda3-4.7.12-Linux-x86_64.sh /opt2/miniconda.sh
+RUN /bin/bash /opt2/miniconda.sh -b -p /opt2/conda && \
+    rm /opt2/miniconda.sh && \
+    ln -s /opt2/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
+    echo ". /opt2/conda/etc/profile.d/conda.sh" >> ~/.bashrc && \
+    echo "conda activate base" >> ~/.bashrc
+
+RUN . /opt2/conda/etc/profile.d/conda.sh && \
+  conda install -y -c conda-forge mamba && \
+  mamba install -y -c conda-forge -c bioconda snakemake
+
+#CMD ["/init"]
+
+MAINTAINER matthew.g.angel@gmail.com

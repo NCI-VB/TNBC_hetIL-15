@@ -1,0 +1,43 @@
+FROM ubuntu:20.04
+
+ENV R_VERSION=4.1.1
+ENV TERM=xterm
+ENV LC_ALL=en_US.UTF-8
+ENV LANG=en_US.UTF-8
+ENV R_HOME=/usr/local/lib/R
+ENV CRAN=https://packagemanager.rstudio.com/all/__linux__/focal/latest
+ENV TZ=Etc/UTC
+ENV S6_VERSION=v2.1.0.2
+ENV RSTUDIO_VERSION=1.4.1717
+ENV DEFAULT_USER=rstudio
+ENV PATH=/opt2:/usr/lib/rstudio-server/bin:$PATH
+ENV DISABLE_AUTH=true
+
+RUN mkdir -p /rocker_scripts && \
+	mkdir -p /opt2
+
+COPY src/rocker-versioned2/scripts /rocker_scripts
+
+RUN /rocker_scripts/install_R.sh && \
+	/rocker_scripts/install_tidyverse.sh && \
+	/rocker_scripts/install_rstudio.sh && \
+	/rocker_scripts/install_pandoc.sh && \
+  install2.r --error --skipinstalled hdf5r
+
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends libxt6 && \
+  apt-get clean
+  
+COPY scripts /opt2
+RUN chmod -R a+rX /opt2 && \
+	Rscript /opt2/install_packages.R
+
+SHELL [ "/bin/bash", "--login", "-c" ]
+
+ADD Dockerfile /opt2/Dockerfile.baseimage
+
+WORKDIR /data2
+
+EXPOSE 8787
+
+MAINTAINER matthew.g.angel@gmail.com

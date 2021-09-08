@@ -1,0 +1,447 @@
+---
+title: "Single Cell Filter and QC"
+author: "Matthew Angel"
+date: "9/4/2021"
+output:
+  rmarkdown::html_document:
+    toc: true
+params:
+  datafolder: /data2
+  scriptsfolder: "/opt2"
+  cnr_npcs: 18
+  cnr_vars_to_regress: "S.Score,G2M.Score"
+---
+<style type="text/css">
+
+body{ /* Normal  */
+      font-size: 12px;
+  }
+td {  /* Table  */
+  font-size: 8px;
+}
+h1.title {
+  font-size: 38px;
+  color: DarkRed;
+}
+h1 { /* Header 1 */
+  font-size: 28px;
+  color: DarkBlue;
+}
+h2 { /* Header 2 */
+    font-size: 22px;
+  color: DarkBlue;
+}
+h3 { /* Header 3 */
+  font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlue;
+}
+code.r{ /* Code block */
+    font-size: 12px;
+}
+pre { /* Code block - determines code spacing between lines */
+    font-size: 14px;
+}
+</style>
+
+```{r setup, echo=FALSE, warning=FALSE,message=FALSE}
+
+  suppressMessages(library(Seurat))
+  suppressMessages(library(reshape2))
+  suppressMessages(library(tidyverse))
+  suppressMessages(library(gridExtra))
+  suppressMessages(library(RColorBrewer))
+  suppressMessages(library(stringr))
+  suppressMessages(library(knitr))
+  suppressMessages(library(ggplot2))
+  suppressMessages(library(gtable))
+  suppressMessages(library(SingleR))
+  suppressMessages(library(cowplot))
+  #suppressMessages(library(tools))
+  #suppressMessages(library(grid))
+  #suppressMessages(library(gridBase))
+  #suppressMessages(library(magrittr))
+
+
+  knitr::opts_chunk$set(echo = FALSE)
+  knitr::opts_knit$set(root.dir= normalizePath('/data2'))
+  knitr::opts_chunk$set(error = FALSE)
+
+```
+
+# Combine and Renormmalize
+```{r combine_and_renormalize, echo = TRUE, warning = FALSE, message = FALSE}
+
+npcs <- as.numeric(params$cnr_npcs)
+vars_to_regress = unlist(str_split(params$cnr_vars_to_regress,','))
+
+obj.list <- readRDS("/data2/filtered_and_qc.rds")
+
+dat = vector()
+for(i in 2:length(obj.list)){dat=c(dat,obj.list[[i]]) }
+obj.names <- names(obj.list)
+obj.list <- obj.list[[1]]# Free up some memory
+  
+so <- merge(obj.list, y = dat, add.cell.ids = obj.names, project = "scRNAProject", merge.data = TRUE)
+rm(list=c("dat","obj.list")) # Free up some memory
+
+so <- ScaleData(so, assay = "RNA", features=rownames(so))
+
+if(is.null(vars_to_regress)){
+  so <- SCTransform(so,do.correct.umi = TRUE, return.only.var.genes = FALSE)
+}else{       
+  so <- SCTransform(so,do.correct.umi = TRUE, vars.to.regress=vars_to_regress,return.only.var.genes = FALSE)
+}
+
+so <- FindVariableFeatures(object = so, nfeatures = 2000, mean.cutoff = c(0.1, 8), dispersion.cutoff = c(1, 100000), selection.method = "vst", verbose = FALSE)
+so <- RunPCA(object = so, npcs = npcs, verbose = FALSE,seed.use = 42)
+so <- RunUMAP(object = so, reduction = "pca", dims = 1:npcs, seed.use=42)
+so <- RunTSNE(object = so, reduction = "pca", dim.embed = 2, dims = 1:npcs, seed.use = 1)
+so <- FindNeighbors(so, dims = 1:npcs)
+
+
+# Do Citeseq
+so <- ScaleData(so, assay = "Protein")
+# VariableFeatures(so,assay="Protein") <- rownames(so$Protein)
+# so <- RunPCA(object = so, assay="Protein",npcs = npcs,verbose = FALSE,reduction.name="protein_pca",seed.use = 42)
+# so <- RunUMAP(object = so, assay="Protein", features=rownames(so$Protein), reduction.name="protein_umap",seed.use=42)
+# so <- RunTSNE(object = so, assay="Protein", features=rownames(so$Protein),seed.use = 1,reduction.name="protein_tsne",check_duplicates=F)
+# so <- FindNeighbors(so, assay="Protein",graph.name="Protein_snn",features=rownames(so$Protein))
+
+
+for (i in seq(0.2,1.2,0.2)){
+  so <- FindClusters(so, resolution = i, algorithm = 1)
+}
+
+
+
+# Plot functions
+n <- 60
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+qual_col_pals = qual_col_pals[c(7,6,2,1,8,3,4,5),]
+cols = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+
+
+grobsList = list()
+p1 <- DimPlot(so, reduction = "tsne", group.by = "orig.ident", repel = TRUE,          pt.size=0.02) + theme_classic() + scale_color_manual(values=cols) + theme(legend.position="top", legend.text=element_text(size=5)) +
+  guides(colour = guide_legend(ncol=3, override.aes = list(size=1, alpha = 1))) +         ggtitle("RNA TSNE")
+grobsList[[length(grobsList)+1]] <- p1
+
+
+p2 <- DimPlot(so, reduction = "umap", group.by = "orig.ident", repel = TRUE, pt.size=0.02) + theme_classic() + scale_color_manual(values=cols) + theme(legend.position="top", legend.text=element_text(size=5)) +
+  guides(colour = guide_legend(ncol=3, override.aes = list(size=1, alpha = 1))) + ggtitle("RNA UMAP")
+grobsList[[length(grobsList)+1]] <- p2
+
+n = ceiling(length(grobsList)^0.5)
+m=ceiling(length(grobsList)/n)
+imageWidth = 1200*n
+imageHeight = 1200*m
+dpi = 300
+
+grobs=arrangeGrob(grobs=grobsList,ncol=n)
+
+png(
+filename="/data2/combine_and_renormalize.png",
+width=imageWidth,
+height=imageHeight,
+units="px",
+pointsize=2,
+bg="white",
+res=dpi,
+type="cairo")
+
+plot(grobs)
+
+null_var <- dev.off()
+
+# clean up
+rm(list=ls()[ls() != c("params","so")])
+
+knitr::include_graphics('/data2/combine_and_renormalize.png')
+```
+
+# SingleR Annotation
+```{r singleR_annotation, echo = TRUE, warning = FALSE, message = FALSE}
+
+counts = GetAssayData(object = so)[, colnames(x = so)]
+singler = CreateSinglerObject(counts = counts,
+                              project.name = "projectDesc" ,
+                              annot = NULL,
+                              min.genes = 0,
+                              technology = '10x',
+                              species = "Mouse",
+                              citation = '',
+                              variable.genes = 'de',
+                              normalize.gene.length = F,
+                              fine.tune = FALSE,
+                              numCores = 4,
+                              reduce.file.size = T,
+                              clusters = so@meta.data$seurat_clusters,
+                              do.signatures = T)
+so <- AddMetaData(so, singler$singler[[1]]$SingleR.single.main$labels, col.name="immgen_main")
+so <- AddMetaData(so, singler$singler[[1]]$SingleR.single.main$labels, col.name="annot")
+so <- AddMetaData(so, singler$singler[[1]]$SingleR.single$labels, col.name="immgen")
+so <- AddMetaData(so, singler$singler[[2]]$SingleR.single.main$labels, col.name="mouseRNAseq_main")
+so <- AddMetaData(so, singler$singler[[2]]$SingleR.single$labels, col.name="mouseRNAseq")
+
+numColors = max(length(unique(so@meta.data$mouseRNAseq_main)),length(unique(so@meta.data$immgen_main)))
+colpaired = colorRampPalette(brewer.pal(12,"Paired"))
+cols=c("#e6194B","#3cb44b","#4363d8","#f58231","#911eb4","#42d4f4","#f032e6","#bfef45","#fabebe","#469990","#e6beff","#9A6324","#800000","#aaffc3","#808000","#000075",colpaired(numColors))
+
+
+imageWidth = 5000
+imageHeight = 3000
+dpi = 300
+
+png(
+  filename="/data2/singleR_annotation.png",
+  width=imageWidth,
+  height=imageHeight,
+  units="px",
+  pointsize=4,
+  bg="white",
+  res=dpi,
+  type="cairo")
+
+p1 = DimPlot(so, reduction="tsne", group.by="immgen_main")  + scale_color_manual(values=cols) + theme(legend.position="top") + guides(override.aes = list(size=2),colour=guide_legend(ncol=4)) + ggtitle("Immgen Main Cell Type Annotations")
+p2 = DimPlot(so, reduction="tsne", group.by="mouseRNAseq_main")  + scale_color_manual(values=cols) + theme(legend.position="top") + guides(override.aes = list(size=2),colour=guide_legend(ncol=4))+ ggtitle("Mouse RNAseq Main Cell Type Annotations")
+
+plot_grid(p1,p2,nrow=1)
+
+null_var <- dev.off()
+
+#clean up
+rm(list=ls()[ls() != c("params","so")])
+
+knitr::include_graphics('/data2/singleR_annotation.png')
+```
+
+# Plot Clusters
+```{r plot_cluster_metadata, echo = TRUE, warning = FALSE, message = FALSE}
+
+summarizeCutOff <-min(5,20)
+
+meta.df <- so@meta.data
+
+m <- grep("SCT_snn_res", colnames(meta.df), value = TRUE)
+
+drawMetadata <- function(x,so.obj,reduction = "tsne"){
+
+  if(!x %in% colnames(so.obj@meta.data)){
+    stop("Unable to find metadata column")
+  }
+
+  #Get reduction coordinnates
+  if(reduction=="tsne"){
+      p1 <- DimPlot(so.obj, reduction = "tsne", group.by = "ident")
+  } else if(reduction=="umap"){
+      p1 <- DimPlot(so.obj, reduction = "umap", group.by = "ident")
+  } else { 
+      p1 <- DimPlot(so.obj, reduction = "pca", group.by = "ident")
+  }
+
+
+  #Categorical/Qualitative Variables
+  if (!is.element(class(meta.df[[x]][1]),c("numeric","integer"))) {
+
+    #plot RNA clusters
+    if(reduction=="tsne"){
+        clusmat=data.frame(umap1=p1$data$tSNE_1,umap2=p1$data$tSNE_2, clusid=as.character(so.obj@meta.data[[x]]))
+    } else if(reduction=="umap"){
+        clusmat=data.frame(umap1=p1$data$UMAP_1,umap2=p1$data$UMAP_2, clusid=as.character(so.obj@meta.data[[x]]))
+    } else { 
+        clusmat=data.frame(umap1=p1$data$PC_1,umap2=p1$data$PC_2, clusid=as.character(so.obj@meta.data[[x]]))
+    }
+
+    clusmat %>% group_by(clusid) %>% summarise(umap1.mean=mean(umap1), umap2.mean=mean(umap2)) -> umap.pos
+    title=as.character(x)
+    cols=list()
+
+    #Lab.palette <- colorRampPalette(brewer.pal(12,"Set3"))
+    Lab.palette <- colorRampPalette(brewer.pal(12,"Paired"))
+    n=length(unique((so.obj@meta.data[[x]])))
+    cols[[1]]=brewer.pal(8, "Set3")[-2]  #Alternative
+    cols[[2]]=brewer.pal(8, "Set1")
+    cols[[3]]=c(cols[[1]],brewer.pal(8,"Set2")[3:6])
+    cols[[4]]=c("#F8766D","#FF9912","#a100ff","#00BA38","#619CFF","#FF1493","#010407")
+    cols[[5]]=c("blue","red","grey")
+    cols[[6]]=Lab.palette(n)
+    cols[[7]]=c("red","green","blue","orange","cyan","purple")
+    cols[[8]]=c("#e6194B","#3cb44b","#4363d8","#f58231","#911eb4","#42d4f4","#f032e6","#bfef45","#fabebe","#469990","#e6beff","#9A6324","#800000","#aaffc3","#808000","#000075","#a9a9a9","#808080","#A9A9A9","#8B7355")
+    colnum = 8
+
+    n = length(unique(clusmat$clusid))
+    #col=c("#e6194B","#3cb44b","#4363d8","#f58231","#911eb4","#42d4f4","#f032e6","#bfef45","#fabebe","#469990","#e6beff","#9A6324","#800000","#aaffc3","#808000","#000075",Lab.palette(max(0,n-15)))[1:n]
+    qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+    qual_col_pals = qual_col_pals[c(7,6,2,1,8,3,4,5),]
+    col = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+
+    #Select to add labels to plot or not:
+    g <- ggplot(clusmat, aes(x=umap1, y=umap2)) +
+        theme_bw() +
+        theme(legend.title=element_blank()) +
+        geom_point(aes(colour=clusid),size=0.01) +
+        scale_color_manual(values=col) +
+        xlab(paste(reduction,"-1")) + ylab(paste(reduction,"-2")) +
+        theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="top",
+        panel.background = element_blank(),legend.text=element_text(size=rel(1))) +
+        guides(colour = guide_legend(override.aes = list(size=5, alpha = 1))) +
+        ggtitle(title)
+
+
+  } else {
+      ##THIS IS THE PART WE PLOT QUANTITATIVE DATA
+      x = as.character(x)
+      clusid = so.obj@meta.data[[x]]
+      clusid = scales::rescale(so.obj@meta.data[[x]], to=c(0,1))
+      clus.quant=quantile(clusid[clusid>0],probs=c(.1,.5,.9))
+      midpt = clus.quant[2]
+      midpt2 = clus.quant[1]
+      midpt3 = clus.quant[3]
+      #hist(clusid[!is.na(clusid)], breaks=100, main=m)
+      #abline(v=midpt,col="red",lwd=2)
+
+      #plot RNA clusters
+      if(reduction=="tsne"){
+          clusmat=data.frame(umap1=p1$data$tSNE_1,umap2=p1$data$tSNE_2, clusid=as.numeric(so.obj@meta.data[[x]]))
+      } else if(reduction=="umap"){
+          clusmat=data.frame(umap1=p1$data$UMAP_1,umap2=p1$data$UMAP_2, clusid=as.numeric(so.obj@meta.data[[x]]))
+      } else {
+          clusmat=data.frame(umap1=p1$data$PC_1,umap2=p1$data$PC_2, clusid=as.numeric(so.obj@meta.data[[x]]))
+      }
+
+
+      clusmat %>% group_by(clusid) %>% summarise(umap1.mean=mean(umap1), umap2.mean=mean(umap2)) -> umap.pos
+      title=as.character(x)
+      clusmat %>% dplyr::arrange(clusid) -> clusmat
+      g <- ggplot(clusmat, aes(x=umap1, y=umap2)) +
+          theme_bw() +
+          theme(legend.title=element_blank()) +
+          geom_point(aes(colour=clusid),size=1) +
+          #scale_color_gradient2(low = "blue4", mid = "white", high = "red",
+          #          midpoint = midpt[[p]], na.value="grey",limits = c(0, 1)) + 
+          scale_color_gradientn(colours = c("blue4", "lightgrey", "red"), values = scales::rescale(c(0, midpt2,midpt,midpt3, 1), limits = c(0, 1))) +
+          theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank()) +
+          ggtitle(title) +
+          xlab("tsne-1") + ylab("tsne-2")
+  }
+
+  return(g)
+}
+
+grobs <- lapply(m, function(x) drawMetadata(x, so))
+
+n = ceiling(length(m)^0.5)
+y=ceiling(length(m)/n)
+imageWidth = 2000*n
+imageHeight = 2000*y
+dpi = 300
+
+png(
+      filename="/data2/prefilter_clusters.png",
+      width=imageWidth,
+      height=imageHeight,
+      units="px",
+      pointsize=4,
+      bg="white",
+      res=dpi,
+      type="cairo")
+
+grid.arrange(grobs = grobs,ncol = n,newpage=F)
+
+null_var <- dev.off()
+
+knitr::include_graphics('/data2/prefilter_clusters.png')
+```
+
+
+# Identify Fcgr1 expressing clusters
+    #groups of interest. From. Metadata column count table
+```{r plot_fcgr1_violin, echo = TRUE, warning = FALSE, message = FALSE}
+
+ident_of_interest  <- "SCT_snn_res.0.6"
+groups_of_interest <- c("0","1","2","3","4","5","6","7","8","9","10","11","12")
+genes_of_interest <- c("Fcgr1")
+scale_data = TRUE
+reorder_ident = TRUE
+rename_ident = ""
+ylimit = NULL
+plot_style = "grid"
+
+
+new_idents = as.factor(so@meta.data[[ident_of_interest]])
+names(new_idents) = names(so@active.ident)
+so@active.ident <- as.factor(vector())
+so@active.ident <- new_idents
+so.sub = subset(so, ident = groups_of_interest)
+
+DefaultAssay(object = so.sub) <- "SCT"
+data <- FetchData(object = so.sub, vars = genes_of_interest, slot = "scale.data")
+
+data[[ident_of_interest]] <- so.sub@meta.data[row.names(data),ident_of_interest]
+
+df.melt <- melt(data)
+colnames(df.melt) <- c(ident_of_interest,"Gene","Expression")
+
+if(suppressWarnings(all(!is.na(as.numeric(as.character(df.melt[[ident_of_interest]])))))){
+    ident.values <- strtoi(df.melt[[ident_of_interest]])
+    ident.levels <- unique(ident.values)[order(unique(ident.values))]
+    df.melt[[ident_of_interest]] <- factor(ident.values, levels = ident.levels)
+}else if(reorder_ident){
+    # if non-numeric, place in order of groups of interests
+    df.melt[[ident_of_interest]] <- factor(df.melt[[ident_of_interest]], levels = groups_of_interest)        
+}
+
+remove_outliers_func <- function(x, na.rm = TRUE){
+    qnt <- quantile(x, probs=c(0.25,0.75), na.rm = na.rm)
+    H <- 1.5*IQR(x, na.rm = na.rm)
+    y <- x
+    y[x < (qnt[1] - H)] <- NA
+    y[x > (qnt[2] + H)] <- NA
+    y
+}
+
+for(gene in genes_of_interest){
+    for(group in groups_of_interest){
+        current.ind <- which(df.melt[["Gene"]] == gene & df.melt[[ident_of_interest]] == group)
+        df.melt[current.ind,"Expression"] <- remove_outliers_func(df.melt[current.ind,"Expression", drop = TRUE])
+    }
+}
+
+expression_data = "scaled"
+axis.title.y = "Expression (scaled)"
+ylimit <- ylimit %||% 1
+df.melt <- df.melt %>% group_by(Gene) %>% mutate(scaled = scales::rescale(Expression, to=c(0,ylimit)))
+
+ncol = ceiling(length(unique(df.melt$Gene))^0.5)
+nrow = ceiling(length(unique(df.melt$Gene)) / ncol)
+
+imageWidth = 5000
+imageHeight = 3000
+dpi = 300
+
+png(
+  filename="/data2/Fcgr1_violin_plots.png",
+  width=imageWidth,
+  height=imageHeight,
+  units="px",
+  pointsize=4,
+  bg="white",
+  res=dpi,
+  type="cairo")
+
+ggplot(df.melt, aes_string(x=ident_of_interest, y=expression_data)) +
+  geom_violin(aes_string(fill = ident_of_interest), scale="width", trim = FALSE, show.legend = FALSE) + 
+  #geom_jitter(height = 0, width = 0.05, size=0.1) +
+  theme_classic() + 
+  #scale_fill_manual(values=cols) + 
+  labs(y=axis.title.y) +
+  theme(strip.text.y = element_text( 
+      color="blue", face="bold.italic", angle = -90)) +
+  geom_boxplot(width=0.1, fill="white", outlier.shape = ifelse(FALSE,19,NA))+
+  facet_wrap(~Gene, nrow = nrow, ncol = ncol)
+
+null_var <- dev.off()
+
+knitr::include_graphics('/data2/Fcgr1_violin_plots.png')
+```

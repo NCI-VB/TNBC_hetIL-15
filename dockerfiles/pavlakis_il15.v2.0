@@ -1,0 +1,15 @@
+FROM nidap:2.0
+
+RUN apt-get update && \
+	apt-get install -y libhdf5-103 && \
+	apt-get clean
+
+COPY scripts2/ /opt2
+
+# Add study data
+RUN mkdir -p /input_data
+COPY cellranger /input_data
+COPY nanostring /input_data
+
+ENTRYPOINT ["/opt2/pipeline_ctl.sh"]
+MAINTAINER matthew.g.angel@gmail.com

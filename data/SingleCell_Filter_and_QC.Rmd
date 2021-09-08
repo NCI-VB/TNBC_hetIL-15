@@ -1,0 +1,642 @@
+---
+title: "Single Cell Filter and QC"
+author: "Matthew Angel"
+date: "9/4/2021"
+output:
+  rmarkdown::html_document:
+    toc: true
+params:
+  data_dir: /data2
+  scriptsfolder: "/opt2"
+  cellranger_data: "/input_data/C_TUMOR_CD11.protein.h5,/input_data/IL15_TUMOR_CD11.protein.h5"
+  sample_names: "Control,Treated"
+  sc_filter_mincells: 3
+  sc_filter_mingenes: 300
+  sc_filter_mincomplexity: 0.5
+  sc_filter_minmad_genes: 3
+  sc_filter_minmad_mito: 3
+  doJackStraw: FALSE
+  qc_vars_to_regress: "S.Score,G2M.Score"
+  qc_npcs: 25
+---
+<style type="text/css">
+
+body{ /* Normal  */
+      font-size: 12px;
+  }
+td {  /* Table  */
+  font-size: 8px;
+}
+h1.title {
+  font-size: 38px;
+  color: DarkRed;
+}
+h1 { /* Header 1 */
+  font-size: 28px;
+  color: DarkBlue;
+}
+h2 { /* Header 2 */
+    font-size: 22px;
+  color: DarkBlue;
+}
+h3 { /* Header 3 */
+  font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlue;
+}
+code.r{ /* Code block */
+    font-size: 12px;
+}
+pre { /* Code block - determines code spacing between lines */
+    font-size: 14px;
+}
+</style>
+
+```{r setup, echo=FALSE, warning=FALSE,message=FALSE}
+
+  suppressMessages(library(Seurat))
+  suppressMessages(library(reshape2))
+  suppressMessages(library(tidyverse))
+  suppressMessages(library(gridExtra))
+  suppressMessages(library(RColorBrewer))
+  suppressMessages(library(stringr))
+  suppressMessages(library(knitr))
+  suppressMessages(library(ggplot2))
+  suppressMessages(library(gtable))
+
+  # Not installing properly otherwise
+  if(!"hdf5r" %in% installed.packages()){
+    install.packages("hdf5r")
+  }
+  suppressMessages(library("hdf5r"))
+
+  knitr::opts_chunk$set(echo = FALSE)
+  knitr::opts_knit$set(root.dir= normalizePath('/data2'))
+  knitr::opts_chunk$set(error = FALSE)
+
+```
+
+# Filter and QC Sample
+```{r filter_and_qc, echo = TRUE, warning = FALSE, message = FALSE}
+
+
+# Collect variables
+
+data_dir <- params$data_dir
+scriptsfolder <- params$scriptsfolder
+cellranger_data <- unlist(str_split(params$cellranger_data, ','))
+sample_names <- unlist(str_split(params$sample_names, ','))
+sc_filter_mincells <- as.numeric(params$sc_filter_mincells)
+sc_filter_mingenes <- as.numeric(params$sc_filter_mingenes)
+sc_filter_mincomplexity <- as.numeric(params$sc_filter_mincomplexity)
+sc_filter_minmad_genes <- as.numeric(params$sc_filter_minmad_genes)
+sc_filter_minmad_mito <- as.numeric(params$sc_filter_minmad_mito)
+
+if(!all(grepl("input_data", params$cellranger_data))){
+  cellranger_data <- file.path(data_dir, cellranger_data)
+}
+print(cellranger_data)
+if(!all(file.exists(cellranger_data))){
+  stop(cellranger_data)
+}
+
+if(length(sample_names) != length(cellranger_data)){
+  stop("Sample names list must be the same length as cell ranger data.")
+}
+
+# Read in data
+localFilePaths <- cellranger_data
+
+obj.list <- lapply(localFilePaths, function(x) { return(Read10X_h5(x, use.names=TRUE)) })
+
+# rename
+names(obj.list) <- sample_names
+obj.list <- obj.list[sort(names(obj.list))]
+
+# fetch mitochondria genes
+mitoch = "^mt-"
+cc.genes$g2m.genes= str_to_title(cc.genes$g2m.genes)
+cc.genes$s.genes = str_to_title(cc.genes$s.genes)
+
+#####FILTER FUNCTION######
+seurat_object <- function(i) {
+  so.nf <- CreateSeuratObject(counts = obj.list[[i]][1]$`Gene Expression`, assay = "RNA", project=names(obj.list)[[i]], min.cells = 1, min.features = 0)
+
+  so.nf <- NormalizeData(so.nf, normalization.method = "LogNormalize", scale.factor = 10000)
+  so.nf[["percent.mt"]] <- PercentageFeatureSet(object = so.nf, pattern = mitoch)
+  so.nf$log10GenesPerUMI <- log10(so.nf$nFeature_RNA) / log10(so.nf$nCount_RNA)
+
+  # bring in ADT data
+  antibodies = rownames(obj.list[[i]][2]$`Antibody Capture`)[!grepl("HTO*",rownames(obj.list[[i]][2]$`Antibody Capture`))]
+  so.nf[['Protein']] <- CreateAssayObject(counts = obj.list[[i]][2]$`Antibody Capture`[antibodies, colnames(x = so.nf)])
+  so.nf <- NormalizeData(so.nf, assay = "Protein", normalization.method = "CLR")
+
+
+  #Filtered Seurat Object:
+  so <- CreateSeuratObject(counts = obj.list[[i]][1]$`Gene Expression`, assay = "RNA", project=names(obj.list)[[i]], min.cells = sc_filter_mincells, min.features = sc_filter_mingenes)
+  so <- NormalizeData(so, normalization.method = "LogNormalize", scale.factor = 10000)
+  so[["percent.mt"]] <- PercentageFeatureSet(object = so, pattern = mitoch)
+  so$log10GenesPerUMI <- log10(so$nFeature_RNA) / log10(so$nCount_RNA)
+
+  rownames(obj.list[[i]][2]$`Antibody Capture`) <- gsub(pattern = "_TotalSeqC", replacement = "", rownames(obj.list[[i]][2]$`Antibody Capture`))
+  antibodies = rownames(obj.list[[i]][2]$`Antibody Capture`)[!grepl("HTO*",rownames(obj.list[[i]][2]$`Antibody Capture`))]
+  so[['Protein']] <- CreateAssayObject(counts = obj.list[[i]][2]$`Antibody Capture`[antibodies, colnames(x = so)])
+  so <- NormalizeData(so, assay = "Protein", normalization.method = "CLR")
+
+  cat(names(obj.list)[i],":\n")
+  so.origcount = dim(so.nf)[2]
+  cat(paste0("Original Cell Count=", so.origcount),"\n")
+
+  #Start with filtering here:
+  ngenestdev <- mad(so@meta.data$nFeature_RNA)
+  ngenemed <- median(so@meta.data$nFeature_RNA)
+  ngenemaxlim <- ngenemed+(sc_filter_minmad_genes*ngenestdev)
+  gl = format(round(ngenemaxlim,0),nsmall=0)
+
+  maxmitoch = 10
+
+  MAD_mitoch <- TRUE
+  mitostdev <- mad(so@meta.data$percent.mt)
+  mitomed <- median(so@meta.data$percent.mt)
+  mitomaxlim <- mitomed+(sc_filter_minmad_mito*mitostdev)
+  ml = format(round(mitomaxlim,2),nsmall=2)
+
+
+  so <- subset(so, cells = rownames(so@meta.data[which(so@meta.data$nFeature_RNA < ngenemaxlim & so@meta.data$percent.mt <= mitomaxlim & so@meta.data$log10GenesPerUMI > sc_filter_mincomplexity), ]))
+  perc.remain = (dim(so)[2]/so.origcount)*100
+  perc.remain=formatC(perc.remain,format = "g",digits=3)
+
+
+
+  plothist <- function(count.df,name){
+    g=ggplot(count.df,aes(x=value,fill=filt)) +
+      theme_bw() +
+      geom_histogram(binwidth=.05, alpha = 0.7, position="identity") +
+      scale_fill_manual(values = c("#00AFBB", "#FC4E07")) +
+      scale_color_manual(values = c("#00AFBB", "#FC4E07")) +
+      labs(x = NULL) +
+      theme(plot.title = element_text(size=6),legend.position='right',legend.text=element_text(size=10),
+            legend.title=element_blank()) +
+      ggtitle(paste(name,count.df$variable[1])) +
+      scale_x_continuous(trans='log10') +
+      scale_linetype_manual(values=rep(c('solid', 'dashed','dotted'),6))
+    return(g)
+  }
+
+  plotviolin <- function(count.df,name){
+    axislab = unique(count.df$filt)
+    col1=brewer.pal(8, "Set3")[-2]
+    col2=c(col1,brewer.pal(8,"Set2")[3:6])
+
+    v = ggplot(count.df, aes(x=filt, y=value)) +
+      ggtitle(paste(name,count.df$variable[1])) +
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+            panel.background = element_blank(),legend.text=element_text(size=rel(1.5)),
+            legend.title=element_blank(), axis.text=element_text(size=10),
+            axis.title.x=element_blank(),axis.title.y=element_blank(),
+            axis.text.x=element_text(angle=45,hjust=1),
+            plot.title = element_text(size = 12, face = "bold")) +
+      geom_violin(aes(fill=as.factor(filt))) +
+      scale_fill_manual(values = c("#00AFBB", "#FC4E07")) +
+      geom_boxplot(width=.1) +
+      scale_x_discrete(limits = as.vector(axislab))
+    return(v)
+  }
+
+  Runplots <- function(x,name){
+    df.m %>% dplyr::filter(variable == x) -> count.df
+    df2.m %>% dplyr::filter(variable == x) -> count2.df
+    qc.df <- array(0,dim=c(0,4))
+    qc.df <- rbind(qc.df,count2.df,count.df)
+    if(FALSE){
+      gg <- plothist(qc.df,name)}
+    else{
+      gg <- plotviolin(qc.df,name)
+    }
+  }
+
+  RunScatter <- function(x,name){
+    x <- as.character(x)
+    scplot.m = so@meta.data %>% dplyr::select("nCount_RNA",x) %>% dplyr::mutate(filt = "filt")
+    scplot2.m = so.nf@meta.data %>% dplyr::select("nCount_RNA",x) %>% dplyr::mutate(filt = "raw")
+    sc.plot.all = rbind(scplot2.m,scplot.m)
+    g=ggplot(sc.plot.all,aes_string(x="nCount_RNA",y=x,color="filt")) +
+      geom_point(size = 0.5) +
+      theme_classic() +
+      ggtitle(paste(name))
+    return(g)
+  }
+
+  df.m <- melt(so@meta.data)
+  df.m$filt <- "filt"
+  df.m$filt <- as.factor(df.m$filt)
+  df2.m <- melt(so.nf@meta.data)
+  df2.m$filt <- "raw"
+  df2.m$filt <- as.factor(df2.m$filt)
+
+  v <- unique(df.m$variable)
+  grob.list <- lapply(v,function(x){Runplots(x,so@project.name)})
+  grob2.list <- lapply(v,function(x){RunScatter(x, so@project.name)})
+  grob.all <- arrangeGrob(grobs = grob.list, ncol = length(grob.list))
+  grob2.all <- arrangeGrob(grobs = grob2.list, ncol = length(grob2.list))
+
+  slot(so,"commands") <- list() #clear command with timestamp for consistent checksum
+  so2.list <- list(so,grob.all,grob2.all)
+
+  return(so2.list)
+}
+
+so.list <- lapply(seq_along(obj.list), seurat_object)
+
+so.f.list <- lapply(so.list,function(x) x[[1]])
+names(so.f.list) <- sapply(names(obj.list), function(x) gsub("_filtered.h5", "", x))
+
+so.grobs.list <- lapply(so.list,function(x) x[[2]])
+so.grobs2.list <- lapply(so.list,function(x) x[[3]])
+
+cat("Final filtered samples:\n")
+print(so.f.list)
+
+grobdat = list()
+for(i in 1:length(so.grobs.list)){grobdat=append(grobdat,list(so.grobs.list[[i]])) }
+for(i in 1:length(so.grobs2.list)){grobdat=append(grobdat,list(so.grobs2.list[[i]])) }
+
+imageWidth = min(1000*length(so.list[[1]][[3]]),15000)
+imageHeight = min(1000*length(so.grobs.list)*2,24000)
+dpi = 300
+
+png(
+      filename="/data2/filter_and_qc.png",
+      width=imageWidth,
+      height=imageHeight,
+      units="px",
+      pointsize=4,
+      bg="white",
+      res=dpi,
+      type="cairo")
+
+grid.arrange((arrangeGrob(grobs=grobdat,nrow=length(grobdat))),nrow=1)
+
+null_var <- dev.off()
+
+obj.list <- so.f.list
+
+rm(list=c("so.list","so.f.list"))
+
+knitr::include_graphics('/data2/filter_and_qc.png')
+```
+
+# Post-filter QC Plots
+
+```{r postfilter_qc_plots, echo=TRUE, warning=FALSE,message=FALSE}
+all.columns <- unique(unlist(sapply(seq_along(obj.list), function(i) colnames(obj.list[[i]]@meta.data))))
+qc.df <- array(0,dim=c(0,3))
+    
+for (i in 1:length(obj.list)){
+    so <- obj.list[[i]]
+
+    #Add missing columns to metadata
+    missing.columns <- setdiff(all.columns,colnames(so@meta.data))
+    
+    for(i in missing.columns){
+        so <- AddMetaData(so,rep(0,ncol(so)), i)
+    }
+    df.m <- melt(so@meta.data)
+    qc.df <- rbind(qc.df,df.m)
+}
+
+qfilter <- function(x){
+    library(dplyr)
+    qc.df %>% dplyr::filter(variable == x)
+}
+
+col1=brewer.pal(8, "Set3")[-2] 
+col2=c(col1,brewer.pal(8,"Set2")[3:6])
+col3=c(col2,"#e6194B","#3cb44b","#4363d8","#f58231","#911eb4","#42d4f4","#f032e6","#bfef45","#fabebe","#469990","#e6beff","#9A6324","#800000","#aaffc3","#808000","#000075","#a9a9a9","#808080","#A9A9A9","#8B7355")
+
+plothist <- function(count.df){
+  g=ggplot(count.df) + 
+    theme_bw() +
+    geom_density(aes(x = value, colour = orig.ident)) +
+    labs(x = NULL) +
+    theme(legend.position='right',legend.text=element_text(size=10),
+    legend.title=element_blank()) + 
+    ggtitle(count.df$variable[1]) +
+    scale_x_continuous(trans='log10') + 
+    scale_color_manual(values = col3) 
+  return(g)
+}
+
+plotviolin <- function(count.df){
+  axislab = unique(count.df$orig.ident)
+
+  v=ggplot(count.df, aes(x=orig.ident, y=value)) +
+  ggtitle(count.df$variable[1]) +
+   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(),legend.text=element_text(size=rel(1)),
+        legend.title=element_blank(), axis.text=element_text(size=10),
+        axis.title.x=element_blank(),axis.title.y=element_blank(),
+        axis.text.x=element_blank(),
+        #axis.text.x=element_text(angle=45,hjust=1),
+        plot.title = element_text(size = 20, face = "bold")) +
+  geom_violin(aes(fill=as.factor(orig.ident))) +  
+  scale_fill_manual(values = col3) +
+  geom_boxplot(width=.1) +
+  #labs(colour = n, y=m) +
+  #geom_jitter(height = 0, width = 0.1, size = 0.1) +
+  #scale_y_continuous(trans='log2') + 
+  scale_x_discrete(limits = as.vector(axislab)) 
+  return(v)
+}
+
+plotscatter <- function(count.df,counts){
+  count.df %>% dplyr::mutate("value2"=counts) -> count.df 
+  ylab = as.character(unique(count.df$variable))
+  xlab = "RNA Count"
+  name = paste(ylab,"vs.",xlab)          
+  g <- ggplot(count.df, aes(x=value2, y=value,color = orig.ident)) +
+      geom_point(size = 0.5) + 
+      theme_classic() +
+      theme(legend.position='right',legend.text=element_text(size=10),
+            legend.title=element_blank()) + 
+      guides(colour = guide_legend(override.aes = list(size=2))) +
+      scale_color_manual(values = col3) +
+      labs(title=name, x = xlab, y = ylab)
+      ggtitle(name) 
+
+  return(g)
+}
+    
+
+qc.count <- lapply(unique(qc.df$variable), function(x) {qfilter(x)})
+qc.count[[1]] %>% dplyr::filter(variable=="nCount_RNA") %>% pull(value) -> RNAcounts
+
+
+grobs <- lapply(seq_along(qc.count), function(x) {arrangeGrob(grobs = list(plotscatter(qc.count[[x]],RNAcounts),plothist(qc.count[[x]]),plotviolin(qc.count[[x]])),nrow=1,ncol=3)})
+    
+imageWidth = 5000
+imageHeight = 1000*length(grobs)
+dpi = 300
+
+
+png(
+  filename="/data2/postfilter_qc_plots.png",
+  width=imageWidth,
+  height=imageHeight,
+  units="px",
+  pointsize=4,
+  bg="white",
+  res=dpi,
+  type="cairo")
+
+
+grid.arrange(grobs = grobs, nrow = length(grobs))
+
+null_var <- dev.off()
+
+knitr::include_graphics('/data2/postfilter_qc_plots.png')
+```
+
+# PCA and Elbow Plots
+```{r pca_and_elbow_plots, echo=TRUE, warning=FALSE,message=FALSE}
+
+vars_to_regress <- unlist(str_split(params$qc_vars_to_regress, ','))
+npcs = as.numeric(params$qc_npcs)
+vars_to_plot = vars_to_regress
+
+# Linearly scale data without regressing anything.
+scale_so <- function(so){
+    so <- CellCycleScoring(object = so, g2m.features = cc.genes$g2m.genes,s.features = cc.genes$s.genes)
+    so$CC.Difference <- so$S.Score - so$G2M.Score
+    so <- FindVariableFeatures(object = so, nfeatures = 2000, mean.cutoff = c(1, 8), dispersion.cutoff = c(1, 100000), selection.method = "vst")
+    all.genes <- rownames(so)
+    so <- ScaleData(so,features=all.genes)
+    return(so)
+}
+
+# Make PCA without regressing anything, and using only SCTransform().
+pca_noregress <- function(so) {
+    so <- SCTransform(so,do.correct.umi = FALSE,return.only.var.genes = FALSE)
+    so <- RunPCA(object = so, features = VariableFeatures(object = so), npcs = npcs)
+    return(so)
+}
+
+
+
+# Make PCA with SCTransform() and optional ScaleData, and do so with
+# both regression (if user requests) and on all genes.
+pca <- function(so) {
+    # Run SCTransform().
+    if(is.null(vars_to_regress)){
+        so <- so
+    }
+    else { 
+        so <- SCTransform(so,do.correct.umi = TRUE, vars.to.regress = vars_to_regress, return.only.var.genes = FALSE)
+    }
+    # Make PCA using last transform run, which will always be that from
+    # SCTransform().
+    so <- RunPCA(object = so, npcs = npcs)
+    slot(so,"commands") <- list()
+    return(so)
+}
+
+
+# Do transformation with and without regression using SCTransform()
+# and ScaleData().
+so_scale <- lapply(obj.list, scale_so) 
+
+#### Prepare Images ####
+imageCols = 2
+if (length(vars_to_plot) > 0) {
+    imageCols <- imageCols + length(vars_to_plot)
+}
+
+plotPCA <- function(so,m){
+  p1 <- DimPlot(so, reduction = "pca")
+  clusmat=data.frame(umap1=p1$data$PC_1,umap2=p1$data$PC_2, clusid=so@meta.data[[m]])
+
+  sumpcsd = sum(so@reductions$pca@stdev)
+  pcvar = (so@reductions$pca@stdev/sumpcsd)*100
+  pcvar=formatC(pcvar,format = "g",digits=3)
+  pcvar1 = pcvar[1] 
+  pcvar2 = pcvar[2]
+  pcvar 
+
+  run.categ <- function(mat){
+    colors=c("#e6194B","#3cb44b","#4363d8","#f58231","#911eb4","#42d4f4","#f032e6","#bfef45","#fabebe","#469990","#e6beff","#9A6324","#800000","#aaffc3","#808000","#000075","#a9a9a9")
+
+    g <- ggplot(mat, aes(x=umap1, y=umap2)) +
+                theme_bw() +
+                theme(legend.title=element_blank()) +
+                geom_point(aes(colour=clusid),size=0.5) +
+                scale_color_manual(values=colors) +
+                xlab(paste0("PC-1 ",pcvar[1],"%")) + ylab(paste0("PC-2 ",pcvar[2],"%")) +
+                theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                panel.background = element_blank(),legend.text=element_text(size=rel(1.5))) +
+                guides(colour = guide_legend(override.aes = list(size=5, alpha = 1))) +
+                ggtitle(so@project.name)  
+    return(g)
+  }
+
+  run.cont <- function(mat,midpt,maxpt){
+    g <- ggplot(mat, aes(x=umap1, y=umap2)) +
+      theme_bw() +
+      theme(legend.title=element_blank()) +
+      geom_point(aes(colour=clusid),size=0.5) +
+      scale_colour_gradient2(low = "blue",mid="lightgrey",high = "red",limits=c(0, maxpt),midpoint = midpt) +
+      xlab(paste0("PC-1 ",pcvar[1],"%")) + ylab(paste0("PC-2 ",pcvar[2],"%")) +
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+      panel.background = element_blank(),legend.text=element_text(size=rel(1.5))) +
+      guides(colour = guide_legend(override.aes = list(size=2, alpha = 1))) +
+      ggtitle(paste0(so@project.name,"_",m))  
+    return(g)
+  }
+
+  if(class(clusmat$clusid) == "factor"){
+      g = run.categ(clusmat)
+      return(g)
+  }
+  else{
+      clusmat %>% arrange(clusid) -> clusmat
+      if(m=="percent.mt"){
+        mid=5
+        max = 10
+        clusmat$clusid[clusmat$clusid > max] <- max
+      }
+      else{
+        mid = quantile(clusmat$clusid)[3]
+        max = quantile(clusmat$clusid,probs=0.95)
+        clusmat$clusid[clusmat$clusid > max] <- max
+      }
+      
+      g = run.cont(clusmat,mid,max)
+      return(g)
+  }
+}
+
+
+
+methods = c("Elbow")
+
+
+plotElbow <- function(so){
+
+  if("Elbow" %in% methods){
+    #Find Elbow:
+    sumpcsd = sum(so@reductions$pca@stdev)
+    pcvar = (so@reductions$pca@stdev/sumpcsd)*100
+    cumu <- cumsum(pcvar)
+    co1 <- which(cumu > 80 & pcvar < 5)[1]
+    co2 <- sort(which((pcvar[1:length(pcvar) - 1] - pcvar[2:length(pcvar)]) > 0.1), decreasing = T)[1] + 1
+    pcs = min(co1,co2)
+    lab = paste0("Elbow = ", pcs)
+    xpos = pcs + 4
+  }
+
+  if("Marchenko-Pastur" %in% methods){
+    #Using code from URD (https://rdrr.io/github/farrellja/URD/src/R/pca.R)
+    pcaMarchenkoPastur <- function(M, N, pca.sdev, factor=1, do.print=T) {
+      pca.eigenvalue <- (pca.sdev)^2
+      marchenko.pastur.max <- (1+sqrt(M/N))^2
+      pca.sig <- pca.eigenvalue > (marchenko.pastur.max * factor)
+      
+      if (do.print) {
+        print(paste("Marchenko-Pastur eigenvalue null upper bound:", marchenko.pastur.max))
+        if (factor != 1) {
+          print(paste(length(which(pca.sig)), "PCs have eigenvalues larger than", factor, "times null upper bound."))
+        } else {
+          print(paste(length(which(pca.eigenvalue > marchenko.pastur.max)), "PCs have larger eigenvalues."))
+        }
+      }
+      pca.sig.length = length(pca.sig[pca.sig==TRUE])
+      return(pca.sig.length)
+    }
+
+    M = dim(so$RNA@data)[1]
+    N = dim(so$RNA@data)[2]
+    pca.sdev = so@reductions$pca@stdev
+    pca.sig.num = pcaMarchenkoPastur(M=M,N=N,pca.sdev = pca.sdev)
+    lab2 = paste0("MP = ", pca.sig.num)
+    xpos2 = pca.sig.num+4
+  }
+  
+  ep <- ElbowPlot(so,ndims=30) + theme_bw() + 
+    ggtitle(paste0(so@project.name," Elbow Plot")) 
+
+  if(exists("lab")){
+    ep <- ep + 
+    geom_vline(xintercept = pcs, color="red") +
+    annotate("text",  x=xpos, y = 4, label = lab, color="red",size=4) 
+  }
+  if(exists("lab2")){
+   ep <- ep + 
+   geom_vline(xintercept = pca.sig.num, color="blue") +
+   annotate("text",  x=xpos2, y = 6, label = lab2, color="blue",size=4)
+  }
+  return(ep)
+}
+
+
+if(is.null(vars_to_plot)){
+    vars_to_plot = "nCount_RNA"
+}
+len <- length(vars_to_plot)*2
+grobsList <- vector(mode = "list", length = len)
+
+
+so_orig <- lapply(so_scale, pca_noregress)
+
+k=1
+for (i in 1:length(vars_to_plot)){ 
+    grob <- lapply(so_orig, function(x) plotPCA(x,vars_to_plot[i]))
+    grob=grid.arrange(grobs=grob,nrow=length(grob))
+    grobsList[[k]] <- grob
+    k=k+2   
+}
+rm(so_orig)
+
+so_list <- lapply(so_scale, pca)
+k=1
+for (i in 1:length(vars_to_plot)){ 
+    grob2 <- lapply(so_list, function(x) plotPCA(x,vars_to_plot[i]))
+    grob2=grid.arrange(grobs=grob2,nrow=length(grob2))
+    l=k+1
+    grobsList[[l]] <- grob2
+    k=k+2   
+}
+rm(so_scale)
+
+
+
+grob3 <- lapply(so_list, function(x) plotElbow(x))
+grob3=grid.arrange(grobs=grob3,nrow=length(grob3))
+
+grobsList[[length(grobsList)+1]] <- grob3
+
+grobs <- arrangeGrob(grobs=grobsList,ncol=length(grobsList),newpage=F)
+
+imageWidth = 1000*2*imageCols
+imageHeight = 1000*length(so_list)
+dpi = 300
+
+    png(
+      filename="/data2/pca_and_elbow_plots.png",
+      width=imageWidth,
+      height=imageHeight,
+      units="px",
+      pointsize=4,
+      bg="white",
+      res=dpi,
+      type="cairo")
+
+plot(grobs)
+
+null_var <- dev.off()
+
+saveRDS(so_list,"/data2/filtered_and_qc.rds")
+
+# clean up
+rm(list=ls())
+
+knitr::include_graphics('/data2/pca_and_elbow_plots.png')
+```
